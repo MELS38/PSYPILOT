@@ -2547,16 +2547,8 @@ function detectMirrorInconsistency(td12Answers) {
 }
 
 // ===================== RECRUTEUR LOGIN =====================
-// Mot de passe hashé en SHA-256 — changez-le avant déploiement
-// Pour changer le mot de passe : remplacer le hash ci-dessous par le SHA-256 du nouveau mot de passe
-// Générateur en ligne : https://emn178.github.io/online-tools/sha256.html
-const RECRUITER_PASSWORD_HASH = 'dc071379d46e43d5bb0e4603febd2da69347abe01872bb9bc5f333d8cfad078d'; // ⚠️ Changez ce hash — voir https://emn178.github.io/online-tools/sha256.html
-
-async function hashPassword(pw) {
-  const enc = new TextEncoder().encode(pw);
-  const buf = await crypto.subtle.digest('SHA-256', enc);
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-}
+// Authentification déportée sur Cloudflare Worker — aucun hash dans ce fichier
+const AUTH_WORKER_URL = 'https://psypilot-auth.applepie38100.workers.dev';
 
 function showRecruteurLogin() {
   document.getElementById('login-overlay').style.display = 'flex';
@@ -2571,14 +2563,30 @@ function hideLogin() {
 
 async function checkLogin() {
   const pw = document.getElementById('login-password').value;
-  const hash = await hashPassword(pw);
-  if(hash === RECRUITER_PASSWORD_HASH) {
-    hideLogin();
-    state.isLoggedIn = true;
-    showView('dashboard');
-    renderDashboard();
-  } else {
+  const btn = document.querySelector('#login-overlay .btn-primary');
+  btn.disabled = true;
+  btn.textContent = 'Vérification...';
+  try {
+    const res = await fetch(AUTH_WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    });
+    const { ok } = await res.json();
+    if(ok) {
+      hideLogin();
+      state.isLoggedIn = true;
+      showView('dashboard');
+      renderDashboard();
+    } else {
+      document.getElementById('login-error').style.display = 'block';
+    }
+  } catch {
+    document.getElementById('login-error').textContent = 'Erreur réseau — réessaie.';
     document.getElementById('login-error').style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Accéder →';
   }
 }
 
@@ -4334,7 +4342,7 @@ function closePause(e) {
   document.getElementById('pause-overlay').style.display = 'none';
 }
 
-function showToast(msg) {
+function showToast(msg, duration) {
   const toast = document.createElement('div');
   toast.style.cssText = `
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -4346,7 +4354,7 @@ function showToast(msg) {
   `;
   toast.textContent = msg;
   document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 3000);
+  setTimeout(() => toast.remove(), duration || 3000);
 }
 
 // ===================== CODE CANDIDAT EXISTANT =====================
@@ -4416,17 +4424,32 @@ async function decodeResultCode(code) {
     if(!trimmed.startsWith('PSYP-')) return null;
     const b64 = trimmed.slice(5);
     const json = decodeURIComponent(escape(atob(b64)));
-    const { d: data, h: hmac } = JSON.parse(json);
-    // Vérification HMAC — rejet immédiat si signature invalide ou absente
+    const parsed = JSON.parse(json);
+    const td12Keys = Object.keys(TD12_DIMS);
+    const sosieKeys = Object.keys(SOSIE_DIMS);
+    const td12Scores = {};
+    const sosieScores = {};
+
+    // FORMAT LEGACY : tableau brut [ nom, prenom, id, date, t[], s[], compat, coher, status ]
+    if(Array.isArray(parsed)) {
+      const data = parsed;
+      showToast('⚠️ Code ancien format importé — sans vérification de signature.', 4000);
+      td12Keys.forEach((k,i) => td12Scores[k] = data[4][i]||0);
+      sosieKeys.forEach((k,i) => sosieScores[k] = data[5][i]||0);
+      return {
+        nom: data[0], prenom: data[1], id: data[2], date: data[3],
+        td12Scores, sosieScores,
+        compatibility: data[6], coherence: data[7], status: data[8]
+      };
+    }
+
+    // FORMAT V5 : { d: data, h: hmac }
+    const { d: data, h: hmac } = parsed;
     const expectedHmac = await computeHMAC(JSON.stringify(data));
     if(!hmac || hmac !== expectedHmac) {
       alert('\u26a0\ufe0f Code PSYP- invalide ou falsifi\u00e9 — ce code a \u00e9t\u00e9 rejet\u00e9.\nSi ce code a \u00e9t\u00e9 g\u00e9n\u00e9r\u00e9 avec une version ant\u00e9rieure, demandez au candidat de repasser le test.');
       return null;
     }
-    const td12Keys = Object.keys(TD12_DIMS);
-    const sosieKeys = Object.keys(SOSIE_DIMS);
-    const td12Scores = {};
-    const sosieScores = {};
     td12Keys.forEach((k,i) => td12Scores[k] = data[4][i]||0);
     sosieKeys.forEach((k,i) => sosieScores[k] = data[5][i]||0);
     return {
